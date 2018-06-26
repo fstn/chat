@@ -46,6 +46,9 @@ import (
 	_ "github.com/tinode/chat/server/validate/email"
 	_ "github.com/tinode/chat/server/validate/tel"
 	"google.golang.org/grpc"
+
+	// File upload handlers
+	_ "github.com/tinode/chat/server/media/fs"
 )
 
 const (
@@ -129,6 +132,9 @@ var globals struct {
 	maxSubscriberCount int
 	// Maximum number of indexable tags.
 	maxTagCount int
+
+	// Maximum allowed upload size.
+	maxFileUploadSize int64
 }
 
 type validatorConfig struct {
@@ -138,6 +144,19 @@ type validatorConfig struct {
 	Required []string `json:"required"`
 	// Validator params passed to validator unchanged.
 	Config json.RawMessage `json:"config"`
+}
+
+type mediaConfig struct {
+	// The name of the handler to use for file uploads.
+	UseHandler string `json:"use_handler"`
+	// Maximum allowed size of an uploaded file
+	MaxFileUploadSize int64 `json:"max_size"`
+	// Garbage collection timeout
+	GcPeriod int `json:"gc_period"`
+	// Number of entries to delete in one pass
+	GcBlockSize int `json:"gc_block_size"`
+	// Individual handler config params to pass to handlers unchanged.
+	Handlers map[string]json.RawMessage `json:"handlers"`
 }
 
 // Contentx of the configuration file
@@ -168,14 +187,14 @@ type configType struct {
 	MaxTagCount int `json:"max_tag_count"`
 
 	// Configs for subsystems
-	Cluster json.RawMessage `json:"cluster_config"`
-
+	Cluster   json.RawMessage             `json:"cluster_config"`
 	Plugin    json.RawMessage             `json:"plugins"`
 	Store     json.RawMessage             `json:"store_config"`
 	Push      json.RawMessage             `json:"push"`
 	TLS       json.RawMessage             `json:"tls"`
 	Auth      map[string]json.RawMessage  `json:"auth_config"`
 	Validator map[string]*validatorConfig `json:"acc_validation"`
+	Media     *mediaConfig                `json:"media"`
 }
 
 func main() {
@@ -223,9 +242,9 @@ func main() {
 
 	for name, jsconf := range config.Auth {
 		if authhdl := store.GetAuthHandler(name); authhdl == nil {
-			panic("Config provided for unknown authentication scheme '" + name + "'")
+			log.Fatal("Config provided for unknown authentication scheme '" + name + "'")
 		} else if err := authhdl.Init(string(jsconf)); err != nil {
-			panic(err)
+			log.Fatal("Failed to init auth scheme", err)
 		}
 	}
 
@@ -249,9 +268,9 @@ func main() {
 		}
 
 		if val := store.GetValidator(name); val == nil {
-			panic("Config provided for an unknown validator '" + name + "'")
+			log.Fatal("Config provided for an unknown validator '" + name + "'")
 		} else if err := val.Init(string(vconf.Config)); err != nil {
-			panic(err)
+			log.Fatal("Failed to init validator '"+name+"':", err)
 		}
 		if globals.validators == nil {
 			globals.validators = make(map[string]credValidator)
@@ -266,7 +285,7 @@ func main() {
 	globals.immutableTagNS = make(map[string]bool, len(config.Validator))
 	for tag := range config.Validator {
 		if strings.Index(tag, ":") >= 0 {
-			panic("acc_validation names should not contain character ':'")
+			log.Fatal("acc_validation names should not contain character ':'")
 		}
 		globals.immutableTagNS[tag] = true
 	}
@@ -275,7 +294,7 @@ func main() {
 	globals.maskedTagNS = make(map[string]bool, len(config.MaskedTagNamespaces))
 	for _, tag := range config.MaskedTagNamespaces {
 		if strings.Index(tag, ":") >= 0 {
-			panic("masked_tags namespaces should not contain character ':'")
+			log.Fatal("masked_tags namespaces should not contain character ':'")
 		}
 		globals.maskedTagNS[tag] = true
 	}
@@ -296,9 +315,29 @@ func main() {
 		globals.maxTagCount = defaultMaxTagCount
 	}
 
+	if config.Media != nil {
+		if config.Media.UseHandler == "" {
+			config.Media = nil
+		} else {
+			globals.maxFileUploadSize = config.Media.MaxFileUploadSize
+			if config.Media.Handlers != nil {
+				var conf string
+				if params := config.Media.Handlers[config.Media.UseHandler]; params != nil {
+					conf = string(params)
+				}
+				if err = store.UseMediaHandler(config.Media.UseHandler, conf); err != nil {
+					log.Fatal("Failed to init media handler", config.Media.UseHandler, err)
+				}
+			}
+			if config.Media.GcPeriod > 0 && config.Media.GcBlockSize > 0 {
+				largeFileRunGarbageCollection(time.Second*time.Duration(config.Media.GcPeriod), config.Media.GcBlockSize)
+			}
+		}
+	}
+
 	err = push.Init(string(config.Push))
 	if err != nil {
-		log.Fatal("Failed to initialize push notifications: ", err)
+		log.Fatal("Failed to initialize push notifications:", err)
 	}
 	defer func() {
 		push.Stop()
@@ -322,17 +361,18 @@ func main() {
 	// available, otherwise assume '<current dir>/static'. The content is served at
 	// the path pointed by 'static_mount' in the config. If that is missing then it's
 	// served at '/x/'.
+	var staticMountPoint string
 	if *staticPath != "" && *staticPath != "-" {
 		if *staticPath == defaultStaticPath {
 			path, err := os.Getwd()
 			if err != nil {
-				log.Fatal(err)
+				log.Fatal("Failed to get current directory:", err)
 			}
 			// FileServer expects "/" path separator even on Windows.
 			*staticPath = path + "/" + defaultStaticPath
 		}
 
-		staticMountPoint := config.StaticMount
+		staticMountPoint = config.StaticMount
 		if staticMountPoint == "" {
 			staticMountPoint = defaultStaticMount
 		} else {
@@ -349,7 +389,9 @@ func main() {
 				// Remove mount point prefix
 				http.StripPrefix(staticMountPoint,
 					// Optionally add Strict-Transport_security to the response
-					hstsHandler(http.FileServer(http.Dir(*staticPath))))))
+					hstsHandler(
+						// And add custom formatter for errors.
+						httpErrorHandler(http.FileServer(http.Dir(*staticPath)))))))
 		log.Printf("Serving static content from '%s' at '%s'", *staticPath, staticMountPoint)
 	} else {
 		log.Println("Static content is disabled")
@@ -360,8 +402,17 @@ func main() {
 	http.HandleFunc("/v0/channels", serveWebSocket)
 	// Handle long polling clients. Enable compression.
 	http.Handle("/v0/channels/lp", gzip.CompressHandler(http.HandlerFunc(serveLongPoll)))
-	// Serve json-formatted 404 for all other URLs
-	http.HandleFunc("/", serve200)
+	if config.Media != nil {
+		// Handle uploads of large files.
+		http.Handle("/v0/file/u", gzip.CompressHandler(http.HandlerFunc(largeFileUpload)))
+		// Serve large files.
+		http.Handle("/v0/file/s/", gzip.CompressHandler(http.HandlerFunc(largeFileServe)))
+	}
+
+	if staticMountPoint != "/" {
+		// Serve json-formatted 404 for all other URLs
+		http.HandleFunc("/", serve404)
+	}
 
 	// Set up gRPC server, if one is configured
 	if *listenGrpc == "" {
@@ -376,12 +427,4 @@ func main() {
 	if err := listenAndServe(config.Listen, *tlsEnabled, string(config.TLS), signalHandler()); err != nil {
 		log.Fatal(err)
 	}
-}
-
-func getAPIKey(req *http.Request) string {
-	apikey := req.FormValue("apikey")
-	if apikey == "" {
-		apikey = req.Header.Get("X-Tinode-APIKey")
-	}
-	return apikey
 }

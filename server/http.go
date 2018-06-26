@@ -10,6 +10,7 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log"
@@ -20,6 +21,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/tinode/chat/server/store"
+	"github.com/tinode/chat/server/store/types"
 
 	"golang.org/x/crypto/acme/autocert"
 )
@@ -190,8 +194,45 @@ func hstsHandler(handler http.Handler) http.Handler {
 	return handler
 }
 
-func serve200(wrt http.ResponseWriter, req *http.Request) {
-	wrt.WriteHeader(http.StatusOK)
+// The following code is used to intercept HTTP errors so they can be wrapped into json.
+
+// Wrapper around http.ResponseWriter which detects status set to 400+ and replaces
+// default error message with a custom one.
+type errorResponseWriter struct {
+	status int
+	http.ResponseWriter
+}
+
+func (w *errorResponseWriter) WriteHeader(status int) {
+	if status >= http.StatusBadRequest {
+		w.status = status
+		w.ResponseWriter.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.ResponseWriter.WriteHeader(status)
+	}
+}
+
+func (w *errorResponseWriter) Write(p []byte) (n int, err error) {
+	if w.status >= http.StatusBadRequest {
+		p, _ = json.Marshal(
+			&ServerComMessage{Ctrl: &MsgServerCtrl{
+				Timestamp: time.Now().UTC().Round(time.Millisecond),
+				Code:      w.status,
+				Text:      http.StatusText(w.status)}})
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+// Handler which deploys errorResponseWriter
+func httpErrorHandler(h http.Handler) http.Handler {
+	return http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			h.ServeHTTP(&errorResponseWriter{0, w}, r)
+		})
+}
+
+func serve404(wrt http.ResponseWriter, req *http.Request) {
+	wrt.Header().Set("Content-Type", "application/json; charset=utf-8")
+	wrt.WriteHeader(http.StatusNotFound)
 	json.NewEncoder(wrt).Encode(
 		&ServerComMessage{Ctrl: &MsgServerCtrl{
 			Timestamp: time.Now().UTC().Round(time.Millisecond),
@@ -211,4 +252,82 @@ func tlsRedirect(toPort string) http.HandlerFunc {
 		}
 		http.Redirect(wrt, req, target, http.StatusTemporaryRedirect)
 	}
+}
+
+// Get API key from an HTTP request.
+func getAPIKey(req *http.Request) string {
+	// Check header.
+	apikey := req.Header.Get("X-Tinode-APIKey")
+
+	// Check URL query parameters.
+	if apikey == "" {
+		apikey = req.URL.Query().Get("apikey")
+	}
+
+	// Check form values.
+	if apikey == "" {
+		apikey = req.FormValue("apikey")
+	}
+
+	// Check cookies.
+	if apikey == "" {
+		if c, err := req.Cookie("apikey"); err == nil {
+			apikey = c.Value
+		}
+	}
+	return apikey
+}
+
+// Get authorization credentials from an HTTP request.
+func getHttpAuth(req *http.Request) (string, string) {
+	// Check Authorization header.
+	if parts := strings.Split(req.Header.Get("Authorization"), " "); len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+
+	// Check URL query parameters.
+	if auth := req.URL.Query().Get("auth"); auth != "" {
+		return auth, req.URL.Query().Get("secret")
+	}
+
+	// Check form values.
+	if auth := req.FormValue("auth"); auth != "" {
+		return auth, req.FormValue("secret")
+	}
+
+	// Check cookies as the last resort.
+	if auth, err := req.Cookie("auth"); err == nil {
+		if secret, err := req.Cookie("secret"); err == nil {
+			return auth.Value, secret.Value
+		}
+	}
+	return "", ""
+}
+
+// Authenticate non-websocket HTTP request
+func authHttpRequest(req *http.Request) (types.Uid, error) {
+	var uid types.Uid
+	if authMethod, secret := getHttpAuth(req); authMethod != "" {
+		decodedSecret := make([]byte, base64.StdEncoding.DecodedLen(len(secret)))
+		if _, err := base64.StdEncoding.Decode(decodedSecret, []byte(secret)); err != nil {
+			return uid, types.ErrMalformed
+		}
+		authhdl := store.GetAuthHandler(authMethod)
+		if authhdl != nil {
+			if rec, err := authhdl.Authenticate(decodedSecret); err == nil {
+				uid = rec.Uid
+			} else {
+				return uid, err
+			}
+		} else {
+			log.Println("fileUpload: token is present but token auth handler is not found")
+		}
+	} else {
+		// Find the session, make sure it's appropriately authenticated.
+		sess := globals.sessionStore.Get(req.FormValue("sid"))
+		if sess != nil {
+			uid = sess.uid
+		}
+	}
+	return uid, nil
 }

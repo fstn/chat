@@ -1248,6 +1248,9 @@ func (t *Topic) replyGetDesc(sess *Session, id, tempName string, opts *MsgGetOpt
 		// Don't report message IDs to users without Read access.
 		if (pud.modeGiven & pud.modeWant).IsReader() {
 			desc.SeqId = t.lastID
+			// FIXME: report TouchedAt
+			// desc.TouchedAt = t.touchedAt
+
 			// Make sure reported values are sane:
 			// t.delID <= pud.delID; t.readID <= t.recvID <= t.lastID
 			desc.DelId = max(pud.delID, t.delID)
@@ -1882,14 +1885,14 @@ func (t *Topic) replyDelMsg(sess *Session, del *MsgClientDel) error {
 				// Range is inclusive - exclusive [low, hi),
 				// to delete all messages hi must be lastId + 1
 				dq.HiId = t.lastID + 1
-			} else if dq.LowId == dq.HiId {
+			} else if dq.LowId == dq.HiId || dq.LowId+1 == dq.HiId {
 				dq.HiId = 0
 			}
 
 			if dq.HiId == 0 {
 				count++
 			} else {
-				count += dq.HiId - dq.LowId + 1
+				count += dq.HiId - dq.LowId
 			}
 
 			ranges = append(ranges, types.Range{Low: dq.LowId, Hi: dq.HiId})

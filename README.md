@@ -14,6 +14,12 @@ The promise of [XMPP](http://xmpp.org/) was to deliver federated instant messagi
 The goal of this project is to actually deliver on XMPP's original vision: create a modern open platform for federated instant messaging with emphasis on mobile communication. A secondary goal is to create a decentralized IM platform which is much harder to track and block by the governments.
 
 
+## Getting support
+
+* For support, general questions, discussion post to [https://groups.google.com/d/forum/tinode](https://groups.google.com/d/forum/tinode).
+* For bugs [open an issue](https://github.com/tinode/chat/issues/new).
+
+
 ## Demo
 
 ### Web 
@@ -63,15 +69,15 @@ A text-only [command line client](./tn-cli) implements every possible command.
 * Ability to block unwanted communication server-side.
 * Anonymous users (important for use cases related to tech support over chat).
 * Mobile push notifications using [FCM](https://firebase.google.com/docs/cloud-messaging/).
+* Support for storage and out of band transfer of large objects like video files.
 * Plugins to extend functionality like enabling chat bots.
 
 ### Planned
 
 * iOS client bindings and client.
 * Federation.
-* Options for transfer of large objects like video.
 * End to end encryption with [OTR](https://en.wikipedia.org/wiki/Off-the-Record_Messaging) for one-on-one messaging and undecided method for group messaging.
-* Group messaging with unlimited number of members with bearer token access control.
+* Group messaging with unlimited number (or hundreds of thousands) of members with bearer token access control.
 * Hot standby.
 * Different levels of message persistence (from strict persistence to "store until delivered" to purely ephemeral messaging).
 

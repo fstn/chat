@@ -30,7 +30,7 @@ const (
 	defaultDSN      = "root:@tcp(localhost:3306)/tinode?parseTime=true"
 	defaultDatabase = "tinode"
 
-	dbVersion = 101
+	dbVersion = 105
 
 	adapterName = "mysql"
 )
@@ -342,12 +342,12 @@ func (a *adapter) CreateDb(reset bool) error {
 	// Deletion log
 	if _, err = tx.Exec(
 		`CREATE TABLE dellog(
-			id         INT NOT NULL AUTO_INCREMENT,
-			topic      VARCHAR(25) NOT NULL,
-			deletedfor BIGINT NOT NULL DEFAULT 0,
-			delid      INT NOT NULL,
-			low        INT NOT NULL,
-			hi         INT NOT NULL,
+			id			INT NOT NULL AUTO_INCREMENT,
+			topic		VARCHAR(25) NOT NULL,
+			deletedfor	BIGINT NOT NULL DEFAULT 0,
+			delid		INT NOT NULL,
+			low			INT NOT NULL,
+			hi			INT NOT NULL,
 			PRIMARY KEY(id),
 			FOREIGN KEY(topic) REFERENCES topics(name),
 			UNIQUE INDEX dellog_topic_delid_deletedfor(topic,delid,deletedfor),
@@ -360,13 +360,13 @@ func (a *adapter) CreateDb(reset bool) error {
 	// User credentials
 	if _, err = tx.Exec(
 		`CREATE TABLE credentials(
-			id 			INT NOT NULL AUTO_INCREMENT,
-			createdat 	DATETIME(3) NOT NULL,
-			updatedat 	DATETIME(3) NOT NULL,	
-			method 		VARCHAR(16) NOT NULL,
+			id			INT NOT NULL AUTO_INCREMENT,
+			createdat	DATETIME(3) NOT NULL,
+			updatedat	DATETIME(3) NOT NULL,	
+			method		VARCHAR(16) NOT NULL,
 			value		VARCHAR(128) NOT NULL,
 			synthetic	VARCHAR(192) NOT NULL,
-			userid 		BIGINT NOT NULL,
+			userid		BIGINT NOT NULL,
 			resp		VARCHAR(255),
 			done		TINYINT NOT NULL DEFAULT 0,
 			retries		INT NOT NULL DEFAULT 0,		
@@ -374,6 +374,37 @@ func (a *adapter) CreateDb(reset bool) error {
 			UNIQUE credentials_uniqueness(synthetic),
 			FOREIGN KEY(userid) REFERENCES users(id)
 		);`); err != nil {
+		return err
+	}
+
+	// Records of uploaded files.
+	if _, err = tx.Exec(
+		`CREATE TABLE fileuploads(
+			id			BIGINT NOT NULL,
+			createdat	DATETIME(3) NOT NULL,
+			updatedat	DATETIME(3) NOT NULL,	
+			userid		BIGINT NOT NULL,
+			status		INT NOT NULL,
+			mimetype	VARCHAR(255) NOT NULL,
+			size		BIGINT NOT NULL,
+			location	VARCHAR(2048) NOT NULL,
+			PRIMARY KEY(id),
+			FOREIGN KEY(userid) REFERENCES users(id)
+		)`); err != nil {
+		return err
+	}
+
+	// Links between uploaded files and messages they are attached to.
+	if _, err = tx.Exec(
+		`CREATE TABLE filemsglinks(
+			id			INT NOT NULL AUTO_INCREMENT,
+			createdat	DATETIME(3) NOT NULL,
+			fileid		BIGINT NOT NULL,
+			msgid 		INT NOT NULL,
+			PRIMARY KEY(id),
+			FOREIGN KEY(fileid) REFERENCES fileuploads(id) ON DELETE CASCADE,
+			FOREIGN KEY(msgid) REFERENCES messages(id) ON DELETE CASCADE
+		)`); err != nil {
 		return err
 	}
 
@@ -572,6 +603,7 @@ func (a *adapter) UserGetAll(ids ...t.Uid) ([]t.User, error) {
 
 	users := []t.User{}
 	q, _, _ := sqlx.In("SELECT * FROM users WHERE id IN (?)", uids)
+	q = a.db.Rebind(q)
 	rows, err := a.db.Queryx(q, uids...)
 	if err != nil {
 		return nil, err
@@ -832,8 +864,6 @@ func (a *adapter) TopicsForUser(uid t.Uid, keepDeleted bool, opts *t.QueryOpt) (
 		return nil, err
 	}
 
-	//log.Printf("TopicsForUser topq, usrq: %+v, %+v", topq, usrq)
-
 	var subs []t.Subscription
 	if len(topq) > 0 || len(usrq) > 0 {
 		subs = make([]t.Subscription, 0, len(join))
@@ -844,6 +874,7 @@ func (a *adapter) TopicsForUser(uid t.Uid, keepDeleted bool, opts *t.QueryOpt) (
 		q, _, _ := sqlx.In(
 			"SELECT createdat,updatedat,deletedat,touchedat,name AS id,access,seqid,delid,public,tags "+
 				"FROM topics WHERE name IN (?)", topq)
+		q = a.db.Rebind(q)
 		rows, err = a.db.Queryx(q, topq...)
 		if err != nil {
 			return nil, err
@@ -1163,7 +1194,6 @@ func (a *adapter) SubsForTopic(topic string, keepDeleted bool, opts *t.QueryOpt)
 		ss.User = encodeString(ss.User).String()
 		ss.Private = fromJSON(ss.Private)
 		subs = append(subs, ss)
-		// log.Printf("SubsForTopic: loaded sub %#+v", ss)
 	}
 	rows.Close()
 
@@ -1337,10 +1367,14 @@ func (a *adapter) FindTopics(req, opt []string) ([]t.Subscription, error) {
 
 // Messages
 func (a *adapter) MessageSave(msg *t.Message) error {
-	_, err := a.db.Exec(
+	res, err := a.db.Exec(
 		"INSERT INTO messages(createdAt,updatedAt,seqid,topic,`from`,head,content) VALUES(?,?,?,?,?,?,?)",
 		msg.CreatedAt, msg.UpdatedAt, msg.SeqId, msg.Topic,
 		store.DecodeUid(t.ParseUid(msg.From)), msg.Head, toJSON(msg.Content))
+	if err == nil {
+		id, _ := res.LastInsertId()
+		msg.SetUid(t.Uid(id))
+	}
 	return err
 }
 
@@ -1409,8 +1443,8 @@ func (a *adapter) MessageGetDeleted(topic string, forUser t.Uid, opts *t.QueryOp
 		if opts.Since > 0 {
 			lower = opts.Since
 		}
-		if opts.Before > 0 {
-			upper = opts.Before
+		if opts.Before > 1 {
+			upper = opts.Before - 1
 		}
 
 		if opts.Limit > 0 && opts.Limit < limit {
@@ -1419,7 +1453,7 @@ func (a *adapter) MessageGetDeleted(topic string, forUser t.Uid, opts *t.QueryOp
 	}
 
 	// Fetch log of deletions
-	rows, err := a.db.Queryx("SELECT * FROM dellog WHERE topic=? AND delid BETWEEN ? and ?"+
+	rows, err := a.db.Queryx("SELECT topic,deletedfor,delid,low,hi FROM dellog WHERE topic=? AND delid BETWEEN ? and ?"+
 		" AND (deletedFor=0 OR deletedFor=?)"+
 		" ORDER BY delid LIMIT ?", topic, lower, upper, store.DecodeUid(forUser), limit)
 	if err != nil {
@@ -1461,8 +1495,6 @@ func (a *adapter) MessageGetDeleted(topic string, forUser t.Uid, opts *t.QueryOp
 
 // MessageDeleteList deletes messages in the given topic with seqIds from the list
 func (a *adapter) MessageDeleteList(topic string, toDel *t.DelMessage) (err error) {
-	// log.Println("MessageDeleteList", topic, toDel)
-
 	tx, err := a.db.Begin()
 	if err != nil {
 		return err
@@ -1476,14 +1508,18 @@ func (a *adapter) MessageDeleteList(topic string, toDel *t.DelMessage) (err erro
 
 	if toDel == nil {
 		// Whole topic is being deleted, thus also deleting all messages.
-		_, err = a.db.Exec("DELETE FROM dellog WHERE topic=?", topic)
-		_, err = a.db.Exec("DELETE FROM messages WHERE topic=?", topic)
+		_, err = tx.Exec("DELETE FROM dellog WHERE topic=?", topic)
+		if err == nil {
+			_, err = tx.Exec("DELETE FROM messages WHERE topic=?", topic)
+		}
+		// filemsglinks will be deleted because of ON DELETE CASCADE
+
 	} else {
 		// Only some messages are being deleted
 		// Start with making log entries
 		forUser := decodeString(toDel.DeletedFor)
-		var stmt *sqlx.Stmt
-		if stmt, err = a.db.Preparex(
+		var insert *sql.Stmt
+		if insert, err = tx.Prepare(
 			"INSERT INTO dellog(topic,deletedfor,delid,low,hi) VALUES(?,?,?,?,?)"); err != nil {
 			return err
 		}
@@ -1495,41 +1531,90 @@ func (a *adapter) MessageDeleteList(topic string, toDel *t.DelMessage) (err erro
 				rng.Hi = rng.Low
 			}
 			seqCount += rng.Hi - rng.Low + 1
-			if _, err = stmt.Exec(topic, forUser, toDel.DelId, rng.Low, rng.Hi); err != nil {
+			if _, err = insert.Exec(topic, forUser, toDel.DelId, rng.Low, rng.Hi); err != nil {
 				break
 			}
 		}
 
 		if err == nil && toDel.DeletedFor == "" {
 			// Hard-deleting messages requires updates to the messages table
-			where := "topic=? AND "
+			where := "m.topic=? AND "
 			args := []interface{}{topic}
-			if len(toDel.SeqIdRanges) > 1 || toDel.SeqIdRanges[0].Hi <= toDel.SeqIdRanges[0].Low {
-				for _, rng := range toDel.SeqIdRanges {
-					if rng.Hi == 0 {
-						args = append(args, rng.Low)
+			if len(toDel.SeqIdRanges) > 1 || toDel.SeqIdRanges[0].Hi == 0 {
+				for _, r := range toDel.SeqIdRanges {
+					if r.Hi == 0 {
+						args = append(args, r.Low)
 					} else {
-						for i := rng.Low; i <= rng.Hi; i++ {
+						for i := r.Low; i < r.Hi; i++ {
 							args = append(args, i)
 						}
 					}
 				}
 
-				where += "seqid IN (?" + strings.Repeat(",?", seqCount-1) + ")"
+				where += "m.seqid IN (?" + strings.Repeat(",?", seqCount-1) + ")"
 			} else {
-				// Optimizing for a special case of single range low..hi
-				where += "seqid BETWEEN ? AND ?"
-				args = append(args, toDel.SeqIdRanges[0].Low)
-				args = append(args, toDel.SeqIdRanges[0].Hi)
+				// Optimizing for a special case of single range low..hi.
+				where += "m.seqid BETWEEN ? AND ?"
+				// MySQL's BETWEEN is inclusive-inclusive thus decrement Hi by 1.
+				args = append(args, toDel.SeqIdRanges[0].Low, toDel.SeqIdRanges[0].Hi-1)
+			}
+			where += " AND m.deletedAt IS NULL"
+
+			_, err = tx.Exec("DELETE fml.* FROM filemsglinks AS fml INNER JOIN messages AS m ON m.id=fml.msgid WHERE "+
+				where, args...)
+			if err != nil {
+				return err
 			}
 
-			_, err = a.db.Exec("UPDATE messages SET deletedAt=?,delId=?,head=NULL,content=NULL WHERE "+
-				where+
-				" AND deletedAt IS NULL",
+			_, err = tx.Exec("UPDATE messages AS m SET m.deletedAt=?,m.delId=?,m.head=NULL,m.content=NULL WHERE "+
+				where,
 				append([]interface{}{t.TimeNow(), toDel.DelId}, args...)...)
 		}
 	}
 
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// MessageAttachments connects given message to a list of file record IDs.
+func (a *adapter) MessageAttachments(msgId t.Uid, fids []string) error {
+	var args []interface{}
+	var values []string
+	strNow := t.TimeNow().Format("2006-01-02T15:04:05.999")
+	// createdat,fileid,msgid
+	val := "VALUES('" + strNow + "',?," + strconv.FormatInt(int64(msgId), 10) + ")"
+	for _, fid := range fids {
+		id := t.ParseUid(fid)
+		if id.IsZero() {
+			return t.ErrMalformed
+		}
+		values = append(values, val)
+		args = append(args, store.DecodeUid(id))
+	}
+	if len(args) == 0 {
+		return t.ErrMalformed
+	}
+
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	_, err = a.db.Exec("INSERT INTO filemsglinks(createdat,fileid,msgid) "+strings.Join(values, ","), args...)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec("UPDATE fileuploads SET updatedat='"+strNow+"' WHERE id IN (?"+
+		strings.Repeat(",?", len(args)-1)+")", args...)
 	if err != nil {
 		return err
 	}
@@ -1560,13 +1645,13 @@ func (a *adapter) DeviceUpsert(uid t.Uid, def *t.DeviceDef) error {
 	}()
 
 	// Ensure uniqueness of the device ID: delete all records of the device ID
-	_, err = a.db.Exec("DELETE FROM devices WHERE hash=?", hash)
+	_, err = tx.Exec("DELETE FROM devices WHERE hash=?", hash)
 	if err != nil {
 		return err
 	}
 
 	// Actually add/update DeviceId for the new user
-	_, err = a.db.Exec("INSERT INTO devices(userid, hash, deviceId, platform, lastseen, lang) VALUES(?,?,?,?,?,?)",
+	_, err = tx.Exec("INSERT INTO devices(userid, hash, deviceId, platform, lastseen, lang) VALUES(?,?,?,?,?,?)",
 		store.DecodeUid(uid), hash, def.DeviceId, def.Platform, def.LastSeen, def.Lang)
 	if err != nil {
 		return err
@@ -1665,8 +1750,8 @@ func (a *adapter) CredDel(uid t.Uid, method string) error {
 
 func (a *adapter) CredConfirm(uid t.Uid, method string) error {
 	res, err := a.db.Exec(
-		"UPDATE credentials SET done=1,synthetic=CONCAT(method,':',value) WHERE userid=? AND method=?",
-		store.DecodeUid(uid), method)
+		"UPDATE credentials SET updatedat=?,done=1,synthetic=CONCAT(method,':',value) WHERE userid=? AND method=?",
+		t.TimeNow(), store.DecodeUid(uid), method)
 	if err != nil {
 		if isDupe(err) {
 			return t.ErrDuplicate
@@ -1680,8 +1765,8 @@ func (a *adapter) CredConfirm(uid t.Uid, method string) error {
 }
 
 func (a *adapter) CredFail(uid t.Uid, method string) error {
-	_, err := a.db.Exec("UPDATE credentials SET retries=retries+1 WHERE userid=? AND method=?",
-		store.DecodeUid(uid), method)
+	_, err := a.db.Exec("UPDATE credentials SET updatedat=?,retries=retries+1 WHERE userid=? AND method=?",
+		t.TimeNow(), store.DecodeUid(uid), method)
 	return err
 }
 
@@ -1710,6 +1795,124 @@ func (a *adapter) CredGet(uid t.Uid, method string) ([]*t.Credential, error) {
 	rows.Close()
 
 	return result, err
+}
+
+// FileUploads
+
+// FileStartUpload initializes a file upload
+func (a *adapter) FileStartUpload(fd *t.FileDef) error {
+	_, err := a.db.Exec("INSERT INTO fileuploads(id,createdat,updatedat,userid,status,mimetype,size,location)"+
+		" VALUES(?,?,?,?,?,?,?,?)",
+		store.DecodeUid(fd.Uid()), fd.CreatedAt, fd.UpdatedAt,
+		store.DecodeUid(t.ParseUid(fd.User)), fd.Status, fd.MimeType, fd.Size, fd.Location)
+	return err
+}
+
+// FileFinishUpload markes file upload as completed, successfully or otherwise
+func (a *adapter) FileFinishUpload(fid string, status int, size int64) (*t.FileDef, error) {
+	id := t.ParseUid(fid)
+	if id.IsZero() {
+		return nil, t.ErrMalformed
+	}
+
+	fd, err := a.FileGet(fid)
+	if err != nil {
+		return nil, err
+	}
+	if fd == nil {
+		return nil, t.ErrNotFound
+	}
+
+	fd.UpdatedAt = t.TimeNow()
+	_, err = a.db.Exec("UPDATE fileuploads SET updatedat=?,status=?,size=? WHERE id=?",
+		fd.UpdatedAt, status, size, store.DecodeUid(id))
+	if err == nil {
+		fd.Status = status
+		fd.Size = size
+	} else {
+		fd = nil
+	}
+	return fd, err
+}
+
+// FileGet fetches a record of a specific file
+func (a *adapter) FileGet(fid string) (*t.FileDef, error) {
+	id := t.ParseUid(fid)
+	if id.IsZero() {
+		return nil, t.ErrMalformed
+	}
+
+	var fd t.FileDef
+	err := a.db.Get(&fd, "SELECT id,createdat,updatedat,userid AS user,status,mimetype,size,location "+
+		"FROM fileuploads WHERE id=?", store.DecodeUid(id))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	fd.Id = encodeString(fd.Id).String()
+	fd.User = encodeString(fd.User).String()
+
+	return &fd, nil
+
+}
+
+// FileDeleteUnused deletes file upload records and (if unusedOnly==false) file message link records.
+func (a *adapter) FileDeleteUnused(olderThan time.Time, limit int) ([]string, error) {
+	tx, err := a.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	query := "SELECT fu.id,fu.location FROM fileuploads AS fu LEFT JOIN filemsglinks AS fml ON fml.fileid=fu.id WHERE fml.id IS NULL "
+	var args []interface{}
+	if !olderThan.IsZero() {
+		query += "AND fu.updatedat<? "
+		args = append(args, olderThan)
+	}
+	if limit > 0 {
+		query += "LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := tx.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	var locations []string
+	var ids []interface{}
+	for rows.Next() {
+		var id int
+		var loc string
+		if err = rows.Scan(&id, &loc); err != nil {
+			break
+		}
+		locations = append(locations, loc)
+		ids = append(ids, id)
+	}
+	rows.Close()
+
+	if err != nil {
+		return nil, err
+	}
+
+	if len(ids) > 0 {
+		query, _, _ = sqlx.In("DELETE FROM fileuploads WHERE id IN (?)", ids)
+		_, err = tx.Exec(query, ids...)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return locations, tx.Commit()
 }
 
 // Helper functions

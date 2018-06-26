@@ -649,13 +649,13 @@ func (s *Session) login(msg *ClientComMessage) {
 
 	handler := store.GetAuthHandler(msg.Login.Scheme)
 	if handler == nil {
+		log.Println("Unknown authentication scheme", msg.Login.Scheme)
 		s.queueOut(ErrAuthUnknownScheme(msg.Login.Id, "", msg.timestamp))
 		return
 	}
 
 	rec, err := handler.Authenticate(msg.Login.Secret)
 	if err != nil {
-		log.Println("auth failed", err)
 		s.queueOut(decodeStoreError(err, msg.Login.Id, "", msg.timestamp, nil))
 		return
 	}
