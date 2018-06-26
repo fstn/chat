@@ -24,7 +24,7 @@ fi
 
 echo "Releasing $version"
 GOPATH=/Users/stephenzambaux/go
-GOSRC=${GOPATH}/src/github.com/fstn
+GOSRC=/Users/stephenzambaux/IdeaProjects/
 
 pushd ${GOSRC}/chat > /dev/null
 
