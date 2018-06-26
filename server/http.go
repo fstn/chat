@@ -191,7 +191,7 @@ func hstsHandler(handler http.Handler) http.Handler {
 }
 
 func serve404(wrt http.ResponseWriter, req *http.Request) {
-	wrt.WriteHeader(http.StatusSuccess)
+	wrt.WriteHeader(http.StatusOK)
 	json.NewEncoder(wrt).Encode(
 		&ServerComMessage{Ctrl: &MsgServerCtrl{
 			Timestamp: time.Now().UTC().Round(time.Millisecond),
