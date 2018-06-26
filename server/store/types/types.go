@@ -2,7 +2,6 @@ package types
 
 import (
 	"database/sql/driver"
-	"encoding/base32"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -52,7 +51,10 @@ const ZeroUid Uid = 0
 // Lengths of various Uid representations
 const (
 	uidBase64Unpadded = 11
+	uidBase64Padded   = 12
+
 	p2pBase64Unpadded = 22
+	p2pBase64Padded   = 24
 )
 
 // IsZero checks if Uid is uninitialized.
@@ -91,8 +93,11 @@ func (uid *Uid) UnmarshalText(src []byte) error {
 	if len(src) != uidBase64Unpadded {
 		return errors.New("Uid.UnmarshalText: invalid length")
 	}
-	dec := make([]byte, base64.URLEncoding.WithPadding(base64.NoPadding).DecodedLen(uidBase64Unpadded))
-	count, err := base64.URLEncoding.WithPadding(base64.NoPadding).Decode(dec, src)
+	dec := make([]byte, base64.URLEncoding.DecodedLen(uidBase64Padded))
+	for len(src) < uidBase64Padded {
+		src = append(src, '=')
+	}
+	count, err := base64.URLEncoding.Decode(dec, src)
 	if count < 8 {
 		if err != nil {
 			return errors.New("Uid.UnmarshalText: failed to decode " + err.Error())
@@ -109,10 +114,10 @@ func (uid *Uid) MarshalText() ([]byte, error) {
 		return []byte{}, nil
 	}
 	src := make([]byte, 8)
-	dst := make([]byte, base64.URLEncoding.WithPadding(base64.NoPadding).EncodedLen(8))
+	dst := make([]byte, base64.URLEncoding.EncodedLen(8))
 	binary.LittleEndian.PutUint64(src, uint64(*uid))
-	base64.URLEncoding.WithPadding(base64.NoPadding).Encode(dst, src)
-	return dst, nil
+	base64.URLEncoding.Encode(dst, src)
+	return dst[0:uidBase64Unpadded], nil
 }
 
 // MarshalJSON converts Uid to double quoted ("ajjj") string.
@@ -132,31 +137,16 @@ func (uid *Uid) UnmarshalJSON(b []byte) error {
 	return uid.UnmarshalText(b[1 : size-1])
 }
 
-// String converts Uid to base64 string.
+// String converts Uid to string
 func (uid Uid) String() string {
 	buf, _ := uid.MarshalText()
 	return string(buf)
-}
-
-// String32 converts Uid to lowercase base32 string (suitable for file names on Windows).
-func (uid Uid) String32() string {
-	data, _ := uid.MarshalBinary()
-	return strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(data))
 }
 
 // ParseUid parses string NOT prefixed with anything
 func ParseUid(s string) Uid {
 	var uid Uid
 	uid.UnmarshalText([]byte(s))
-	return uid
-}
-
-// ParseUid32 parses base32-encoded string into Uid
-func ParseUid32(s string) Uid {
-	var uid Uid
-	if data, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(s); err == nil {
-		uid.UnmarshalBinary(data)
-	}
 	return uid
 }
 
@@ -202,7 +192,7 @@ func (uid Uid) P2PName(u2 Uid) string {
 			return ""
 		}
 
-		return "p2p" + base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(b1)
+		return "p2p" + base64.URLEncoding.EncodeToString(b1)[:p2pBase64Unpadded]
 	}
 
 	return ""
@@ -216,9 +206,12 @@ func ParseP2P(p2p string) (uid1, uid2 Uid, err error) {
 			err = errors.New("ParseP2P: invalid length")
 			return
 		}
-		dec := make([]byte, base64.URLEncoding.WithPadding(base64.NoPadding).DecodedLen(p2pBase64Unpadded))
+		dec := make([]byte, base64.URLEncoding.DecodedLen(p2pBase64Padded))
+		for len(src) < p2pBase64Padded {
+			src = append(src, '=')
+		}
 		var count int
-		count, err = base64.URLEncoding.WithPadding(base64.NoPadding).Decode(dec, src)
+		count, err = base64.URLEncoding.Decode(dec, src)
 		if count < 16 {
 			if err != nil {
 				err = errors.New("ParseP2P: failed to decode " + err.Error())
@@ -818,7 +811,7 @@ type SoftDelete struct {
 }
 
 // MessageHeaders is needed to attach Scan() to.
-type MessageHeaders map[string]interface{}
+type MessageHeaders map[string]string
 
 // Scan implements sql.Scanner interface.
 func (mh *MessageHeaders) Scan(val interface{}) error {
@@ -845,8 +838,7 @@ type Message struct {
 	Content interface{}
 }
 
-// Range is a range of message SeqIDs. Low end is inclusive (closed), high end is exclusive (open): [Low, Hi).
-// If the range contains just one ID, Hi is set to 0
+// Range is a range of message SeqIDs. If one ID in range, Hi is set to 0 or unset
 type Range struct {
 	Low int
 	Hi  int `json:"Hi,omitempty"`
@@ -967,25 +959,4 @@ type DeviceDef struct {
 	LastSeen time.Time
 	// Device language, ISO code
 	Lang string
-}
-
-const (
-	UploadStarted = iota
-	UploadCompleted
-	UploadFailed
-)
-
-// FileDef is a stored record of a file upload
-type FileDef struct {
-	ObjHeader
-	// Status of upload
-	Status int
-	// User who created the file
-	User string
-	// Type of the file.
-	MimeType string
-	// Size of the file in bytes.
-	Size int64
-	// Internal file location, i.e. path on disk or an S3 blob address.
-	Location string
 }

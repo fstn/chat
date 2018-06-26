@@ -39,12 +39,7 @@ func delrangeSerialize(in []MsgDelRange) []types.Range {
 
 	var out []types.Range
 	for _, r := range in {
-		if r.HiId <= r.LowId+1 {
-			// High end is exclusive, i.e. range 1..2 is equivalent to 1.
-			out = append(out, types.Range{Low: r.LowId})
-		} else {
-			out = append(out, types.Range{Low: r.LowId, Hi: r.HiId})
-		}
+		out = append(out, types.Range{Low: r.LowId, Hi: r.HiId})
 	}
 
 	return out

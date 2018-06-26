@@ -410,7 +410,7 @@ func pluginFind(user types.Uid, query string) (string, []types.Subscription, err
 	}
 	for _, p := range globals.plugins {
 		if !p.filterFind {
-			// Plugin cannot service Find requests
+			// Plugin cannot cervice Find requests
 			continue
 		}
 
@@ -422,26 +422,26 @@ func pluginFind(user types.Uid, query string) (string, []types.Subscription, err
 		} else {
 			ctx = context.Background()
 		}
-		resp, err := p.client.Find(ctx, find)
-		if err != nil {
+		if resp, err := p.client.Find(ctx, find); err == nil {
+			respStatus := resp.GetStatus()
+			// CONTINUE means default processing
+			if respStatus == pbx.RespCode_CONTINUE {
+				continue
+			}
+			// DROP means stop processing the request
+			if respStatus == pbx.RespCode_DROP {
+				return "", nil, nil
+			}
+			// REPLACE: query string was changed. Use the new one for further processing.
+			if respStatus == pbx.RespCode_REPLACE {
+				return resp.GetQuery(), nil, nil
+			}
+			// RESPOND: Plugin provided a specific response. Use it
+			return "", pbSubSliceDeserialize(resp.GetResult()), nil
+		} else {
 			log.Println("plugins: Find call failed", p.name, err)
 			return "", nil, err
 		}
-		respStatus := resp.GetStatus()
-		// CONTINUE means default processing
-		if respStatus == pbx.RespCode_CONTINUE {
-			continue
-		}
-		// DROP means stop processing the request
-		if respStatus == pbx.RespCode_DROP {
-			return "", nil, nil
-		}
-		// REPLACE: query string was changed. Use the new one for further processing.
-		if respStatus == pbx.RespCode_REPLACE {
-			return resp.GetQuery(), nil, nil
-		}
-		// RESPOND: Plugin provided a specific response. Use it
-		return "", pbSubSliceDeserialize(resp.GetResult()), nil
 	}
 
 	return query, nil, nil

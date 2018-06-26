@@ -136,8 +136,14 @@ func serveLongPoll(wrt http.ResponseWriter, req *http.Request) {
 	sess = globals.sessionStore.Get(sid)
 	if sess == nil {
 		log.Println("longPoll: invalid or expired session id", sid)
+
 		wrt.WriteHeader(http.StatusForbidden)
-		enc.Encode(ErrSessionNotFound(now))
+		enc.Encode(
+			&ServerComMessage{Ctrl: &MsgServerCtrl{
+				Timestamp: now,
+				Code:      http.StatusForbidden,
+				Text:      "invalid or expired session id"}})
+
 		return
 	}
 

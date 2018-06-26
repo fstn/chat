@@ -8,14 +8,12 @@ import (
 	"time"
 
 	"github.com/tinode/chat/server/auth"
-	"github.com/tinode/chat/server/db"
-	"github.com/tinode/chat/server/media"
+	"github.com/tinode/chat/server/store/adapter"
 	"github.com/tinode/chat/server/store/types"
 	"github.com/tinode/chat/server/validate"
 )
 
 var adp adapter.Adapter
-var mediaHandler media.Handler
 
 // Unique ID generator
 var uGen types.UidGenerator
@@ -399,7 +397,7 @@ func (TopicsObjMapper) Update(topic string, update map[string]interface{}) error
 	return adp.TopicUpdate(topic, update)
 }
 
-// Delete deletes topic, messages, attachments, and subscriptions.
+// Delete deletes topic, messages and subscriptions.
 func (TopicsObjMapper) Delete(topic string) error {
 	if err := adp.SubsDelForTopic(topic); err != nil {
 		return err
@@ -451,61 +449,16 @@ type MessagesObjMapper struct{}
 // Messages is an instance of MessagesObjMapper to map methods to.
 var Messages MessagesObjMapper
 
-func interfaceToStringSlice(src interface{}) []string {
-	var dst []string
-	if src != nil {
-		if arr, ok := src.([]string); ok {
-			dst = arr
-		} else if arr, ok := src.([]interface{}); ok {
-			for _, val := range arr {
-				if str, ok := val.(string); ok {
-					dst = append(dst, str)
-				}
-			}
-		}
-	}
-	return dst
-}
-
 // Save message
 func (MessagesObjMapper) Save(msg *types.Message) error {
 	msg.InitTimes()
 
 	// Increment topic's or user's SeqId
-	err := adp.TopicUpdateOnMessage(msg.Topic, msg)
-	if err != nil {
+	if err := adp.TopicUpdateOnMessage(msg.Topic, msg); err != nil {
 		return err
 	}
 
-	// Check if the message has attachments. If so, link earlier uploaded files to message.
-	var attachments []string
-	if header, ok := msg.Head["attachments"]; ok {
-		// The header is typed as []interface{}, convert to []string
-		if arr, ok := header.([]interface{}); ok {
-			for _, val := range arr {
-				if url, ok := val.(string); ok {
-					// Convert attachment URLs to file IDs.
-					if fid := mediaHandler.GetIdFromUrl(url); !fid.IsZero() {
-						attachments = append(attachments, fid.String())
-					}
-				}
-			}
-		}
-
-		if len(attachments) == 0 {
-			delete(msg.Head, "attachments")
-		}
-	}
-
-	err = adp.MessageSave(msg)
-	if err != nil {
-		return err
-	}
-
-	if len(attachments) > 0 {
-		return adp.MessageAttachments(msg.Uid(), attachments)
-	}
-	return nil
+	return adp.MessageSave(msg)
 }
 
 // DeleteList deletes multiple messages defined by a list of ranges.
@@ -533,14 +486,11 @@ func (MessagesObjMapper) DeleteList(topic string, delID int, forUser types.Uid, 
 		}
 
 		// Soft-deleting will update one subscription, hard-deleting will ipdate all.
-		// Soft- or hard- is defined by the forUser being defined.
-		err = adp.SubsUpdate(topic, forUser, map[string]interface{}{"DelId": delID})
-		if err != nil {
-			return err
-		}
+		// Soft- or hard- is defined by the forUSer being defined.
+		return adp.SubsUpdate(topic, forUser, map[string]interface{}{"DelId": delID})
 	}
 
-	return err
+	return nil
 }
 
 // GetAll returns multiple messages.
@@ -575,8 +525,6 @@ var authHandlers map[string]auth.AuthHandler
 
 // RegisterAuthScheme registers an authentication scheme handler.
 func RegisterAuthScheme(name string, handler auth.AuthHandler) {
-	name = strings.ToLower(name)
-
 	if authHandlers == nil {
 		authHandlers = make(map[string]auth.AuthHandler)
 	}
@@ -592,7 +540,7 @@ func RegisterAuthScheme(name string, handler auth.AuthHandler) {
 
 // GetAuthHandler returns an auth handler by name.
 func GetAuthHandler(name string) auth.AuthHandler {
-	return authHandlers[strings.ToLower(name)]
+	return authHandlers[name]
 }
 
 // Registered authentication handlers.
@@ -600,7 +548,6 @@ var validators map[string]validate.Validator
 
 // RegisterValidator registers validation scheme.
 func RegisterValidator(name string, v validate.Validator) {
-	name = strings.ToLower(name)
 	if validators == nil {
 		validators = make(map[string]validate.Validator)
 	}
@@ -616,7 +563,7 @@ func RegisterValidator(name string, v validate.Validator) {
 
 // GetValidator returns registered validator by name.
 func GetValidator(name string) validate.Validator {
-	return validators[strings.ToLower(name)]
+	return validators[name]
 }
 
 // DeviceMapper is a struct to map methods used for handling device IDs, used to generate push notifications.
@@ -649,71 +596,4 @@ func (DeviceMapper) GetAll(uid ...types.Uid) (map[types.Uid][]types.DeviceDef, i
 // Delete deletes device record for a given user.
 func (DeviceMapper) Delete(uid types.Uid, deviceID string) error {
 	return adp.DeviceDelete(uid, deviceID)
-}
-
-// Registered media/file handlers.
-var fileHandlers map[string]media.Handler
-
-func RegisterMediaHandler(name string, mh media.Handler) {
-	if fileHandlers == nil {
-		fileHandlers = make(map[string]media.Handler)
-	}
-
-	if mh == nil {
-		panic("RegisterMediaHandler: handler is nil")
-	}
-	if _, dup := fileHandlers[name]; dup {
-		panic("RegisterMediaHandler: called twice for handler " + name)
-	}
-	fileHandlers[name] = mh
-}
-
-func GetMediaHandler() media.Handler {
-	return mediaHandler
-}
-
-func UseMediaHandler(name, config string) error {
-	mediaHandler = fileHandlers[name]
-	if mediaHandler == nil {
-		panic("UseMediaHandler: unknown handler '" + name + "'")
-	}
-	return mediaHandler.Init(config)
-}
-
-// FileMapper is a struct to map methods used for file handling.
-type FileMapper struct{}
-
-// Files is an instance of FileMapper to be used for handling file uploads.
-var Files FileMapper
-
-// StartUpload records that the given user initiated a file upload
-func (FileMapper) StartUpload(fd *types.FileDef) error {
-	fd.Status = types.UploadStarted
-	return adp.FileStartUpload(fd)
-}
-
-// FinishUpload marks started upload as successfully finished.
-func (FileMapper) FinishUpload(fid string, success bool, size int64) (*types.FileDef, error) {
-	status := types.UploadCompleted
-	if !success {
-		status = types.UploadFailed
-	}
-	return adp.FileFinishUpload(fid, status, size)
-}
-
-// Get fetches a file record for a unique file id.
-func (FileMapper) Get(fid string) (*types.FileDef, error) {
-	return adp.FileGet(fid)
-}
-
-// DeleteUnused removes unused attachments.
-func (FileMapper) DeleteUnused(olderThan time.Time, limit int) error {
-	toDel, err := adp.FileDeleteUnused(olderThan, limit)
-	if err != nil {
-		return err
-	}
-	if len(toDel) > 0 {
-		return GetMediaHandler().Delete(toDel)
-	}
-	return nil
 }

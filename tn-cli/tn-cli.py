@@ -49,12 +49,9 @@ def make_vcard(fn, photofile):
             except IOError as err:
                 print("Error opening '" + photofile + "'", err)
 
-    return card
+        card = json.dumps(card)
 
-def encode_to_bytes(src):
-    if src == None:
-        return None
-    return json.dumps(src).encode('utf-8')
+    return card
 
 # Constructing individual messages
 def hiMsg(id):
@@ -69,12 +66,10 @@ def accMsg(id, user, scheme, secret, uname, password, do_login, fn, photo, priva
         secret = str(uname) + ":" + str(password)
     if secret != None:
         secret=secret.encode('utf-8')
-    public = encode_to_bytes(make_vcard(fn, photo))
-    private = encode_to_bytes(private)
     return pb.ClientMsg(acc=pb.ClientAcc(id=str(id), user_id=user,
         scheme=scheme, secret=secret, login=do_login, tags=tags.split(",") if tags else None,
         desc=pb.SetDesc(default_acs=pb.DefaultAcsMode(auth=auth, anon=anon),
-        public=public, private=private)))
+        public=make_vcard(fn, photo), private=private)))
 
 def loginMsg(id, scheme, secret, uname=None, password=None):
     if secret == None and uname != None:
@@ -82,19 +77,18 @@ def loginMsg(id, scheme, secret, uname=None, password=None):
             password = ''
         secret = str(uname) + ":" + str(password)
     onCompletion[str(id)] = lambda params: save_cookie(params)
-    return pb.ClientMsg(login=pb.ClientLogin(id=str(id), scheme=scheme, secret=secret.encode('utf-8')))
+    return pb.ClientMsg(login=pb.ClientLogin(id=str(id), scheme=scheme, secret=secret))
 
 def subMsg(id, topic, fn, photo, private, auth, anon, mode, tags, get_query):
     if get_query:
         get_query = pb.GetQuery(what=get_query.split(",").join(" "))
-    public = encode_to_bytes(make_vcard(fn, photo))
-    private = encode_to_bytes(private)
-    return pb.ClientMsg(sub=pb.ClientSub(id=str(id), topic=topic,
+
+    return pb.ClientMsg(sub=pb.ClientSub(id=str(id), topic=topic, 
         set_query=pb.SetQuery(
-            desc=pb.SetDesc(public=public, private=private, default_acs=pb.DefaultAcsMode(auth=auth, anon=anon)),
+            desc=pb.SetDesc(public=make_vcard(fn, photo), private=private, default_acs=pb.DefaultAcsMode(auth=auth, anon=anon)),
             sub=pb.SetSub(mode=mode),
             tags=tags.split(",") if tags else None), get_query=get_query))
-
+	
 def getMsg(id, topic, desc, sub, tags, data):
     what = []
     if desc:
@@ -108,16 +102,9 @@ def getMsg(id, topic, desc, sub, tags, data):
     return pb.ClientMsg(get=pb.ClientGet(id=str(id), topic=topic,
         query=pb.GetQuery(what=" ".join(what))))
 
-def setMsg(id, topic, user, fn, photo, public, private, auth, anon, mode, tags):
-    if public == None:
-        public = encode_to_bytes(make_vcard(fn, photo))
-    else:
-        public = encode_to_bytes(public)
-    private = encode_to_bytes(private)
+def setMsg(id, topic, user, fn, photo, private, auth, anon, mode, tags):
     return pb.ClientMsg(set=pb.ClientSet(id=str(id), topic=topic,
-        query=pb.SetQuery(
-            desc=pb.SetDesc(default_acs=pb.DefaultAcsMode(auth=auth, anon=anon),
-                public=public, private=private),
+        query=pb.SetQuery(desc=pb.SetDesc(default_acs=pb.DefaultAcsMode(auth=auth, anon=anon), public=make_vcard(fn, photo), private=private),
         sub=pb.SetSub(user_id=user, mode=mode),
         tags=tags)))
 
@@ -237,7 +224,6 @@ def parse_cmd(cmd):
         parser.add_argument('topic', help='topic to update')
         parser.add_argument('--fn', default=None, help='topic\'s name')
         parser.add_argument('--photo', default=None, help='avatar file name')
-        parser.add_argument('--public', default=None, help='topic\'s public info, alternative to fn+photo')
         parser.add_argument('--private', default=None, help='topic\'s private info')
         parser.add_argument('--auth', default=None, help='default access mode for authenticated users')
         parser.add_argument('--anon', default=None, help='default access mode for anonymous users')
@@ -297,7 +283,7 @@ def serialize_cmd(string, id):
     elif cmd.cmd == "login":
         return loginMsg(id, cmd.scheme, cmd.secret, cmd.uname, cmd.password)
     elif cmd.cmd == "sub":
-        return subMsg(id, cmd.topic, cmd.fn, cmd.photo, cmd.private, cmd.auth, cmd.anon,
+        return subMsg(id, cmd.topic, cmd.fn, cmd.photo, cmd.private, cmd.auth, cmd.anon, 
             cmd.mode, cmd.tags, cmd.get_query)
     elif cmd.cmd == "leave":
         return pb.ClientMsg(leave=pb.ClientLeave(id=str(id), topic=cmd.topic))
@@ -307,7 +293,7 @@ def serialize_cmd(string, id):
     elif cmd.cmd == "get":
         return getMsg(id, cmd.topic, cmd.desc, cmd.sub, cmd.tags, cmd.data)
     elif cmd.cmd == "set":
-        return setMsg(id, cmd.topic, cmd.user, cmd.fn, cmd.photo, cmd.public, cmd.private,
+        return setMsg(id, cmd.topic, cmd.user, cmd.fn, cmd.photo, cmd.private, 
             cmd.auth, cmd.anon, cmd.mode, cmd.tags)
     elif cmd.cmd == "del":
         return delMsg(id, cmd.topic, cmd.what, cmd.param, cmd.hard)

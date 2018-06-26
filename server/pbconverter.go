@@ -33,7 +33,7 @@ func pbServDataSerialize(data *MsgServerData) *pbx.ServerMsg_Data {
 		FromUserId: data.From,
 		DeletedAt:  timeToInt64(data.DeletedAt),
 		SeqId:      int32(data.SeqId),
-		Head:       interfaceMapToByteMap(data.Head),
+		Head:       data.Head,
 		Content:    interfaceToBytes(data.Content)}}
 }
 
@@ -132,7 +132,7 @@ func pbServDeserialize(pkt *pbx.ServerMsg) *ServerComMessage {
 			From:      data.GetFromUserId(),
 			DeletedAt: int64ToTime(data.GetDeletedAt()),
 			SeqId:     int(data.GetSeqId()),
-			Head:      byteMapToInterfaceMap(data.GetHead()),
+			Head:      data.GetHead(),
 			Content:   data.GetContent(),
 		}
 	} else if pres := pkt.GetPres(); pres != nil {
@@ -235,7 +235,7 @@ func pbCliSerialize(msg *ClientComMessage) *pbx.ClientMsg {
 			Id:      msg.Pub.Id,
 			Topic:   msg.Pub.Topic,
 			NoEcho:  msg.Pub.NoEcho,
-			Head:    interfaceMapToByteMap(msg.Pub.Head),
+			Head:    msg.Pub.Head,
 			Content: interfaceToBytes(msg.Pub.Content)}}
 	} else if msg.Get != nil {
 		pkt.Message = &pbx.ClientMsg_Get{Get: &pbx.ClientGet{
@@ -321,7 +321,7 @@ func pbCliDeserialize(pkt *pbx.ClientMsg) *ClientComMessage {
 			Id:      pub.GetId(),
 			Topic:   pub.GetTopic(),
 			NoEcho:  pub.GetNoEcho(),
-			Head:    byteMapToInterfaceMap(pub.GetHead()),
+			Head:    pub.GetHead(),
 			Content: bytesToInterface(pub.GetContent()),
 		}
 	} else if get := pkt.GetGet(); get != nil {
@@ -380,7 +380,9 @@ func interfaceMapToByteMap(in map[string]interface{}) map[string][]byte {
 func byteMapToInterfaceMap(in map[string][]byte) map[string]interface{} {
 	out := make(map[string]interface{}, len(in))
 	for key, val := range in {
-		out[key] = bytesToInterface(val)
+		var iface interface{}
+		json.Unmarshal(val, &iface)
+		out[key] = iface
 	}
 	return out
 }
@@ -392,10 +394,7 @@ func interfaceToBytes(in interface{}) []byte {
 
 func bytesToInterface(in []byte) interface{} {
 	var out interface{}
-	err := json.Unmarshal(in, &out)
-	if err != nil {
-		log.Println("pbx: failed to parse bytes", string(in), err)
-	}
+	json.Unmarshal(in, &out)
 	return out
 }
 
