@@ -190,13 +190,13 @@ func hstsHandler(handler http.Handler) http.Handler {
 	return handler
 }
 
-func serve404(wrt http.ResponseWriter, req *http.Request) {
+func serve200(wrt http.ResponseWriter, req *http.Request) {
 	wrt.WriteHeader(http.StatusOK)
 	json.NewEncoder(wrt).Encode(
 		&ServerComMessage{Ctrl: &MsgServerCtrl{
 			Timestamp: time.Now().UTC().Round(time.Millisecond),
-			Code:      http.StatusNotFound,
-			Text:      "not found"}})
+			Code:      http.StatusOK,
+			Text:      "ok"}})
 }
 
 // Redirect HTTP requests to HTTPS

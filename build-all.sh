@@ -23,8 +23,8 @@ if [ -z "$version" ]; then
 fi
 
 echo "Releasing $version"
-
-GOSRC=${GOPATH}/src/github.com/tinode
+GOPATH=/Users/stephenzambaux/go
+GOSRC=${GOPATH}/src/github.com/fstn
 
 pushd ${GOSRC}/chat > /dev/null
 

@@ -361,7 +361,7 @@ func main() {
 	// Handle long polling clients. Enable compression.
 	http.Handle("/v0/channels/lp", gzip.CompressHandler(http.HandlerFunc(serveLongPoll)))
 	// Serve json-formatted 404 for all other URLs
-	http.HandleFunc("/", serve404)
+	http.HandleFunc("/", serve200)
 
 	// Set up gRPC server, if one is configured
 	if *listenGrpc == "" {
